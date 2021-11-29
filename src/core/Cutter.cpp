@@ -3148,7 +3148,7 @@ QList<SectionDescription> CutterCore::getAllSections()
         section.paddr = sect->paddr;
         section.size = sect->size;
         section.perm = rz_str_rwx_i(sect->perm);
-        HtPP *digests = rz_core_bin_section_digests(core, sect, hashnames);
+        HtPP *digests = rz_core_bin_create_digests(core, sect->paddr, sect->size, hashnames);
         if (!digests) {
             continue;
         }
