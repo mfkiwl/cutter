@@ -984,6 +984,11 @@ void DisassemblyLeftPanel::paintEvent(QPaintEvent *event)
         int arrowLineNumber = offsetToLine(arrow.jmpToffset());
         int lineArrowY = lineToPixels(arrowLineNumber);
 
+        if (lineStartNumber == arrowLineNumber) {
+            currentLineYPos += lineHeight / 4;
+            lineArrowY -= lineHeight / 4;
+        }
+
         // Draw the lines
         p.drawLine(rightOffset, currentLineYPos, rightOffset - lineOffset, currentLineYPos); // left
         p.drawLine(rightOffset - lineOffset, currentLineYPos, rightOffset - lineOffset,
