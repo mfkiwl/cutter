@@ -38,7 +38,7 @@ jobs:
             cxx-override: default
           - name: linux-x86_64-system-deps # ensure that Cutter can be built at least in basic config on Ubuntu 22.04 using sytem libraries
             image: ubuntu:22.04
-            python-version: 3.10.x
+            python-version: 3.11.x
             system-deps: true
             package: false
             tarball: false
@@ -161,10 +161,13 @@ jobs:
                              g++-12
         fi
     - uses: actions/setup-python@v5
+      if: matrix.system-deps == false
       with:
         python-version: ${{ matrix.python-version }}
     - name: py dependencies
       run: |
+        python3 --version
+        which python3
         # https://github.com/rizinorg/cutter/runs/7170222817?check_suite_focus=true
         python3 -m pip install meson==0.61.5
     - name: Prepare package id
@@ -310,7 +313,7 @@ jobs:
       artifact_linux: ${{ steps.output_setup.outputs.artifact_name }}
   build-linux-old:
     name: ${{ matrix.name }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # only a host environement, actual building happens in a docker image
     strategy:
       matrix:
         name: [
