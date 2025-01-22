@@ -25,6 +25,7 @@ DisassemblyContextMenu::DisassemblyContextMenu(QWidget *parent, MainWindow *main
       offset(0),
       canCopy(false),
       mainWindow(mainWindow),
+      ioModesController(mainWindow),
       actionEditInstruction(this),
       actionNopInstruction(this),
       actionJmpReverse(this),
