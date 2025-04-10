@@ -32,6 +32,7 @@ static CutterCore *uniqueInstance;
 
 namespace RJsonKey {
 RZ_JSON_KEY(addr);
+RZ_JSON_KEY(address);
 RZ_JSON_KEY(addrs);
 RZ_JSON_KEY(addr_end);
 RZ_JSON_KEY(arrow);
@@ -57,6 +58,7 @@ RZ_JSON_KEY(fcn_addr);
 RZ_JSON_KEY(fcn_name);
 RZ_JSON_KEY(fields);
 RZ_JSON_KEY(file);
+RZ_JSON_KEY(flag);
 RZ_JSON_KEY(flags);
 RZ_JSON_KEY(flagname);
 RZ_JSON_KEY(format);
@@ -2275,7 +2277,7 @@ void CutterCore::continueUntilDebug(ut64 offset)
     } else {
         if (!asyncTask(
                     [=](RzCore *core) {
-                        rz_core_debug_continue_until(core, offset, offset);
+                        rz_core_debug_continue_until(core, offset);
                         return nullptr;
                     },
                     debugTask)) {
@@ -2511,12 +2513,12 @@ void CutterCore::stepBackDebug()
 QStringList CutterCore::getDebugPlugins()
 {
     QStringList plugins;
-    RzListIter *iter;
-    RzDebugPlugin *plugin;
     CORE_LOCK();
-    CutterRzListForeach (core->dbg->plugins, iter, RzDebugPlugin, plugin) {
-        plugins << plugin->name;
-    }
+    CutterHtSP<RzDebugPlugin>(core->dbg->plugins)
+            .ForEach([&plugins](const char *k, const RzDebugPlugin *plugin) {
+                plugins << plugin->name;
+                return true;
+            });
     return plugins;
 }
 
@@ -2948,14 +2950,12 @@ QList<RVA> CutterCore::getSeekHistory()
 QStringList CutterCore::getAsmPluginNames()
 {
     CORE_LOCK();
-    RzListIter *it;
     QStringList ret;
-
-    RzAsmPlugin *ap;
-    CutterRzListForeach (core->rasm->plugins, it, RzAsmPlugin, ap) {
-        ret << ap->name;
-    }
-
+    CutterHtSP<RzAsmPlugin>(core->rasm->plugins)
+            .ForEach([&ret](const char *k, const RzAsmPlugin *ap) {
+                ret << ap->name;
+                return true;
+            });
     return ret;
 }
 
@@ -2964,12 +2964,11 @@ QStringList CutterCore::getAnalysisPluginNames()
     CORE_LOCK();
     RzListIter *it;
     QStringList ret;
-
-    RzAnalysisPlugin *ap;
-    CutterRzListForeach (core->analysis->plugins, it, RzAnalysisPlugin, ap) {
-        ret << ap->name;
-    }
-
+    CutterHtSP<RzAnalysisPlugin>(core->analysis->plugins)
+            .ForEach([&ret](const char *k, const RzAnalysisPlugin *ap) {
+                ret << ap->name;
+                return true;
+            });
     return ret;
 }
 
@@ -2977,28 +2976,29 @@ QList<RzBinPluginDescription> CutterCore::getBinPluginDescriptions(bool bin, boo
 {
     CORE_LOCK();
     QList<RzBinPluginDescription> ret;
-    RzListIter *it;
     if (bin) {
-        RzBinPlugin *bp;
-        CutterRzListForeach (core->bin->plugins, it, RzBinPlugin, bp) {
-            RzBinPluginDescription desc;
-            desc.name = bp->name ? bp->name : "";
-            desc.description = bp->desc ? bp->desc : "";
-            desc.license = bp->license ? bp->license : "";
-            desc.type = "bin";
-            ret.append(desc);
-        }
+        CutterHtSP<RzBinPlugin>(core->bin->plugins)
+                .ForEach([&ret](const char *k, const RzBinPlugin *bp) {
+                    RzBinPluginDescription desc;
+                    desc.name = bp->name ? bp->name : "";
+                    desc.description = bp->desc ? bp->desc : "";
+                    desc.license = bp->license ? bp->license : "";
+                    desc.type = "bin";
+                    ret.append(desc);
+                    return true;
+                });
     }
     if (xtr) {
-        RzBinXtrPlugin *bx;
-        CutterRzListForeach (core->bin->binxtrs, it, RzBinXtrPlugin, bx) {
-            RzBinPluginDescription desc;
-            desc.name = bx->name ? bx->name : "";
-            desc.description = bx->desc ? bx->desc : "";
-            desc.license = bx->license ? bx->license : "";
-            desc.type = "xtr";
-            ret.append(desc);
-        }
+        CutterHtSP<RzBinXtrPlugin>(core->bin->binxtrs)
+                .ForEach([&ret](const char *k, const RzBinXtrPlugin *bx) {
+                    RzBinPluginDescription desc;
+                    desc.name = bx->name ? bx->name : "";
+                    desc.description = bx->desc ? bx->desc : "";
+                    desc.license = bx->license ? bx->license : "";
+                    desc.type = "xtr";
+                    ret.append(desc);
+                    return true;
+                });
     }
     return ret;
 }
@@ -3007,9 +3007,7 @@ QList<RzIOPluginDescription> CutterCore::getRIOPluginDescriptions()
 {
     CORE_LOCK();
     QList<RzIOPluginDescription> ret;
-    RzListIter *it;
-    RzIOPlugin *p;
-    CutterRzListForeach (core->io->plugins, it, RzIOPlugin, p) {
+    CutterHtSP<RzIOPlugin>(core->io->plugins).ForEach([&ret](const char *k, const RzIOPlugin *p) {
         RzIOPluginDescription desc;
         desc.name = p->name ? p->name : "";
         desc.description = p->desc ? p->desc : "";
@@ -3019,7 +3017,8 @@ QList<RzIOPluginDescription> CutterCore::getRIOPluginDescriptions()
             desc.uris = QString::fromUtf8(p->uris).split(",");
         }
         ret.append(desc);
-    }
+        return true;
+    });
     return ret;
 }
 
@@ -3027,38 +3026,37 @@ QList<RzCorePluginDescription> CutterCore::getRCorePluginDescriptions()
 {
     CORE_LOCK();
     QList<RzCorePluginDescription> ret;
-    RzListIter *it;
-    RzCorePlugin *p;
-    CutterRzListForeach (core->plugins, it, RzCorePlugin, p) {
+    CutterHtSP<RzCorePlugin>(core->plugins).ForEach([&ret](const char *k, const RzCorePlugin *p) {
         RzCorePluginDescription desc;
         desc.name = p->name ? p->name : "";
         desc.description = p->desc ? p->desc : "";
         desc.license = p->license ? p->license : "";
         ret.append(desc);
-    }
+        return true;
+    });
     return ret;
 }
 
 QList<RzAsmPluginDescription> CutterCore::getRAsmPluginDescriptions()
 {
     CORE_LOCK();
-    RzListIter *it;
     QList<RzAsmPluginDescription> ret;
 
-    RzAsmPlugin *ap;
-    CutterRzListForeach (core->rasm->plugins, it, RzAsmPlugin, ap) {
-        RzAsmPluginDescription plugin;
+    CutterHtSP<RzAsmPlugin>(core->rasm->plugins)
+            .ForEach([&ret](const char *k, const RzAsmPlugin *ap) {
+                RzAsmPluginDescription plugin;
 
-        plugin.name = ap->name;
-        plugin.architecture = ap->arch;
-        plugin.author = ap->author;
-        plugin.version = ap->version;
-        plugin.cpus = ap->cpus;
-        plugin.description = ap->desc;
-        plugin.license = ap->license;
+                plugin.name = ap->name;
+                plugin.architecture = ap->arch;
+                plugin.author = ap->author;
+                plugin.version = ap->version;
+                plugin.cpus = ap->cpus;
+                plugin.description = ap->desc;
+                plugin.license = ap->license;
 
-        ret << plugin;
-    }
+                ret << plugin;
+                return true;
+            });
 
     return ret;
 }
@@ -3349,13 +3347,14 @@ QList<StringDescription> CutterCore::getAllStrings()
     opt.show_asciidot = false;
     opt.esc_bslash = true;
     opt.esc_double_quotes = true;
+    opt.keep_printable = true;
 
     QList<StringDescription> ret;
     for (const auto &str : CutterPVector<RzBinString>(strings)) {
         auto section = obj ? rz_bin_get_section_at(obj, str->paddr, 0) : NULL;
 
         StringDescription string;
-        string.string = rz_str_escape_utf8_keep_printable(str->string, &opt);
+        string.string = rz_str_escape_utf8(str->string, &opt);
         string.vaddr = obj ? rva(obj, str->paddr, str->vaddr, va) : str->paddr;
         string.type = rz_str_enc_as_string(str->type);
         string.size = str->size;
@@ -3915,33 +3914,60 @@ bool CutterCore::isAddressMapped(RVA addr)
     return rz_io_map_get(core->io, addr);
 }
 
-QList<SearchDescription> CutterCore::getAllSearch(QString searchFor, QString space, QString in)
+QList<SearchDescription> CutterCore::getAllSearch(QString searchFor, SearchKind kind, QString in)
 {
     CORE_LOCK();
     QList<SearchDescription> searchRef;
 
+    if (searchFor.isEmpty()) {
+        return {};
+    }
+    TempConfig cfg;
+    cfg.set("search.in", in);
     CutterJson searchArray;
-    {
-        TempConfig cfg;
-        cfg.set("search.in", in);
-        searchArray = cmdj(QString("%1 %2").arg(space, searchFor));
+    char *arg = rz_cmd_escape_arg(searchFor.toUtf8().constData(), RZ_CMD_ESCAPE_ONE_ARG);
+    if (!arg) {
+        return {};
     }
 
-    if (space == "/Rj") {
-        for (CutterJson searchObject : searchArray) {
-            SearchDescription exp;
-
-            exp.code.clear();
-            for (CutterJson gadget : searchObject[RJsonKey::opcodes]) {
-                exp.code += gadget[RJsonKey::opcode].toString() + ";  ";
-            }
-
-            exp.offset = searchObject[RJsonKey::opcodes].first()[RJsonKey::offset].toRVA();
-            exp.size = searchObject[RJsonKey::size].toUt64();
-
-            searchRef << exp;
+    QString cmd, suffix;
+    if (kind == SearchKind::AsmCode || kind == SearchKind::ROPGadgets
+        || kind == SearchKind::ROPGadgetsRegex) {
+        // Those are the searches which don't follow the search hit standardization of the new
+        // search yet.
+        switch (kind) {
+        default:
+            qWarning() << tr("Error invalid search kind\n");
+            return searchRef;
+        case SearchKind::AsmCode:
+            cmd = "/acj";
+            break;
+        case SearchKind::ROPGadgets:
+            cmd = "/Rj";
+            break;
+        case SearchKind::ROPGadgetsRegex:
+            cmd = "/R/j";
+            break;
         }
-    } else {
+        // Legacy commands don't get escaped arguments.
+        auto cstr = QString("%1 %2").arg(cmd, kind == SearchKind::AsmCode ? searchFor : arg);
+        searchArray = cmdj(cstr);
+        if (kind == SearchKind::ROPGadgets || kind == SearchKind::ROPGadgetsRegex) {
+            for (CutterJson searchObject : searchArray) {
+                SearchDescription exp;
+
+                exp.code.clear();
+                for (CutterJson gadget : searchObject[RJsonKey::opcodes]) {
+                    exp.code += gadget[RJsonKey::opcode].toString() + ";  ";
+                }
+
+                exp.offset = searchObject[RJsonKey::opcodes].first()[RJsonKey::offset].toRVA();
+                exp.size = searchObject[RJsonKey::size].toUt64();
+
+                searchRef << exp;
+            }
+            return searchRef;
+        }
         for (CutterJson searchObject : searchArray) {
             SearchDescription exp;
 
@@ -3952,7 +3978,87 @@ QList<SearchDescription> CutterCore::getAllSearch(QString searchFor, QString spa
 
             searchRef << exp;
         }
+        return searchRef;
     }
+    // These are the earches with the unified API.
+    switch (kind) {
+    default:
+        qWarning() << tr("Error invalid search kind\n");
+        return searchRef;
+    case SearchKind::HexString:
+        cmd = "/xj";
+        break;
+    case SearchKind::String:
+        cmd = "/zj";
+        break;
+    case SearchKind::StringCaseInsensitive:
+        cmd = "/zj";
+        suffix = "li";
+        break;
+    case SearchKind::StringRegexExtended:
+        cmd = "/zj";
+        suffix = "e";
+        break;
+    case SearchKind::Value32BE:
+        cmd = "/vj 4be";
+        break;
+    case SearchKind::Value32LE:
+        cmd = "/vj 4le";
+        break;
+    case SearchKind::Value64BE:
+        cmd = "/vj 8be";
+        break;
+    case SearchKind::Value64LE:
+        cmd = "/vj 8le";
+        break;
+    }
+    QString cstr;
+    if (kind == SearchKind::StringRegexExtended || kind == SearchKind::StringCaseInsensitive
+        || kind == SearchKind::String) {
+        // Quote the string since it might contain spaces.
+        cstr = QString("%1 \"%2\" %3").arg(cmd, arg, suffix);
+    } else {
+        cstr = QString("%1 %2").arg(cmd, arg);
+    }
+    searchArray = cmdj(cstr);
+    for (CutterJson searchObject : searchArray) {
+        SearchDescription exp;
+
+        exp.offset = searchObject[RJsonKey::address].toRVA();
+        exp.size = searchObject[RJsonKey::size].toUt64();
+        switch (kind) {
+        default:
+            qWarning() << tr("Error invalid search kind\n");
+            return searchRef;
+        case SearchKind::String:
+        case SearchKind::StringCaseInsensitive:
+        case SearchKind::StringRegexExtended: {
+            QString enc = searchObject[RJsonKey::flag].toString().section(".", 2, 2);
+            if (enc.isEmpty()) {
+                enc = "guess";
+            }
+            QString get_str_cmd =
+                    QString("ps %1 @ 0x%2 @!0x%3")
+                            .arg(enc, QString::number(searchObject[RJsonKey::address].toRVA(), 16),
+                                 QString::number(searchObject[RJsonKey::size].toRVA()
+                                                         * RZ_UNICODE_MAX_BYTES_PER_CHAR,
+                                                 16));
+            auto result = cmdRaw(get_str_cmd);
+            exp.data = result;
+            break;
+        }
+        case SearchKind::HexString:
+        case SearchKind::Value32BE:
+        case SearchKind::Value32LE:
+        case SearchKind::Value64BE:
+        case SearchKind::Value64LE:
+            // Don't add any data for them.
+            // For now they are just reported as length + offset.
+            break;
+        }
+        searchRef << exp;
+    }
+
     return searchRef;
 }
 
@@ -4692,10 +4798,4 @@ void CutterCore::writeGraphvizGraphToFile(QString path, QString format, RzCoreGr
             qWarning() << tr("Cannot get graph at ") << RzAddressString(address);
         }
     }
-}
-
-bool CutterCore::rebaseBin(RVA base_address)
-{
-    CORE_LOCK();
-    return rz_core_bin_rebase(core, base_address);
 }
