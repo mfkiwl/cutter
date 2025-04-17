@@ -3914,14 +3914,12 @@ bool CutterCore::isAddressMapped(RVA addr)
     return rz_io_map_get(core->io, addr);
 }
 
-QList<SearchDescription> CutterCore::getAllSearch(QString searchFor, SearchKind kind, QString in)
+QList<SearchDescription> CutterCore::getAllSearchCommand(QString searchFor, SearchKind kind,
+                                                         QString in)
 {
     CORE_LOCK();
     QList<SearchDescription> searchRef;
 
-    if (searchFor.isEmpty()) {
-        return {};
-    }
     TempConfig cfg;
     cfg.set("search.in", in);
     CutterJson searchArray;
@@ -3931,134 +3929,317 @@ QList<SearchDescription> CutterCore::getAllSearch(QString searchFor, SearchKind 
     }
 
     QString cmd, suffix;
-    if (kind == SearchKind::AsmCode || kind == SearchKind::ROPGadgets
-        || kind == SearchKind::ROPGadgetsRegex) {
-        // Those are the searches which don't follow the search hit standardization of the new
-        // search yet.
-        switch (kind) {
-        default:
-            qWarning() << tr("Error invalid search kind\n");
-            return searchRef;
-        case SearchKind::AsmCode:
-            cmd = "/acj";
-            break;
-        case SearchKind::ROPGadgets:
-            cmd = "/Rj";
-            break;
-        case SearchKind::ROPGadgetsRegex:
-            cmd = "/R/j";
-            break;
-        }
-        // Legacy commands don't get escaped arguments.
-        auto cstr = QString("%1 %2").arg(cmd, kind == SearchKind::AsmCode ? searchFor : arg);
-        searchArray = cmdj(cstr);
-        if (kind == SearchKind::ROPGadgets || kind == SearchKind::ROPGadgetsRegex) {
-            for (CutterJson searchObject : searchArray) {
-                SearchDescription exp;
-
-                exp.code.clear();
-                for (CutterJson gadget : searchObject[RJsonKey::opcodes]) {
-                    exp.code += gadget[RJsonKey::opcode].toString() + ";  ";
-                }
-
-                exp.offset = searchObject[RJsonKey::opcodes].first()[RJsonKey::offset].toRVA();
-                exp.size = searchObject[RJsonKey::size].toUt64();
-
-                searchRef << exp;
-            }
-            return searchRef;
-        }
+    // Those are the searches which don't follow the search hit standardization of the new
+    // search yet.
+    switch (kind) {
+    default:
+        qWarning() << tr("Error invalid search kind\n");
+        return searchRef;
+    case SearchKind::AsmCode:
+        cmd = "/acj";
+        break;
+    case SearchKind::ROPGadgets:
+        cmd = "/Rj";
+        break;
+    case SearchKind::ROPGadgetsRegex:
+        cmd = "/R/j";
+        break;
+    }
+    // Legacy commands don't get escaped arguments.
+    auto cstr = QString("%1 %2").arg(cmd, kind == SearchKind::AsmCode ? searchFor : arg);
+    searchArray = cmdj(cstr);
+    if (kind == SearchKind::ROPGadgets || kind == SearchKind::ROPGadgetsRegex) {
         for (CutterJson searchObject : searchArray) {
             SearchDescription exp;
 
-            exp.offset = searchObject[RJsonKey::offset].toRVA();
-            exp.size = searchObject[RJsonKey::len].toUt64();
-            exp.code = searchObject[RJsonKey::code].toString();
-            exp.data = searchObject[RJsonKey::data].toString();
+            exp.code.clear();
+            for (CutterJson gadget : searchObject[RJsonKey::opcodes]) {
+                exp.code += gadget[RJsonKey::opcode].toString() + ";  ";
+            }
+
+            exp.offset = searchObject[RJsonKey::opcodes].first()[RJsonKey::offset].toRVA();
+            exp.size = searchObject[RJsonKey::size].toUt64();
 
             searchRef << exp;
         }
         return searchRef;
     }
-    // These are the earches with the unified API.
+    for (CutterJson searchObject : searchArray) {
+        SearchDescription exp;
+
+        exp.offset = searchObject[RJsonKey::offset].toRVA();
+        exp.size = searchObject[RJsonKey::len].toUt64();
+        exp.code = searchObject[RJsonKey::code].toString();
+        exp.data = searchObject[RJsonKey::data].toString();
+        exp.detail = rz_meta_get_string(core->analysis, RZ_META_TYPE_COMMENT, exp.offset);
+
+        searchRef << exp;
+    }
+    return searchRef;
+}
+
+static UniquePtrC<RzSearchOpt, &rz_search_opt_free> cutterSetupSearchOptions(RzCore *core)
+{
+    auto searchOpts = UniquePtrC<RzSearchOpt, &rz_search_opt_free>(rz_search_opt_new());
+    if (!searchOpts) {
+        return {};
+    }
+    RzThreadNCores max_threads =
+            (RzThreadNCores)rz_config_get_i(core->config, "search.max_threads");
+    max_threads = rz_th_max_threads(max_threads);
+    ut32 max_hits = rz_config_get_i(core->config, "search.maxhits");
+    const char *show_progress = rz_config_get(core->config, "search.show_progress");
+    if (!(rz_search_opt_set_max_threads(searchOpts.get(), max_threads)
+          && rz_search_opt_set_max_hits(searchOpts.get(), max_hits)
+          && rz_search_opt_set_show_progress_from_str(searchOpts.get(), show_progress))) {
+        RZ_LOG_ERROR("Failed setup find options.\n");
+        return {};
+    }
+
+    RzSearchFindOpt *fopts = rz_core_setup_default_search_find_opts(core);
+    if (!fopts) {
+        RZ_LOG_ERROR("Failed init find options.\n");
+        return {};
+    }
+    if (!rz_search_opt_set_find_options(searchOpts.get(), fopts)) {
+        RZ_LOG_ERROR("Failed add find options to the search options.\n");
+        return {};
+    }
+    return searchOpts;
+}
+
+class CutterSearchLock
+{
+public:
+    CutterSearchLock(RzCore *core) : core_(core)
+    {
+        rz_cons_break_push(NULL, NULL);
+        core_->in_search = true;
+    }
+    ~CutterSearchLock()
+    {
+        rz_cons_break_pop();
+        core_->in_search = false;
+    }
+
+private:
+    RzCore *core_ = nullptr;
+};
+
+static QString cutterGetSearchHitData(RzCore *core, SearchKind kind, RzSearchHit *hit)
+{
+    QString data = "";
+    size_t dataSize = RZ_MAX(hit->size, 16);
+    std::vector<ut8> buffer(dataSize);
+
+    if (!rz_io_read_at(core->io, hit->address, buffer.data(), dataSize)) {
+        return "";
+    }
+
+    switch (kind) {
+    default:
+        // for some kinds, we don't do anything.
+        break;
+    case SearchKind::Value32BE:
+        /* fall-thru */
+    case SearchKind::Value32LE:
+        /* fall-thru */
+    case SearchKind::Value64BE:
+        /* fall-thru */
+    case SearchKind::Value64LE:
+        /* fall-thru */
+    case SearchKind::HexString:
+        /* fall-thru */
+    case SearchKind::CryptographicMaterial:
+        /* fall-thru */
+    case SearchKind::MagicSignature: {
+        data = fromOwnedCharPtr(rz_hex_bin2strdup(buffer.data(), dataSize));
+        break;
+    }
+    case SearchKind::String:
+        /* fall-thru */
+    case SearchKind::StringCaseInsensitive:
+        /* fall-thru */
+    case SearchKind::StringRegexExtended: {
+        RzStrStringifyOpt sopt;
+        RzStrEnc encoding = RZ_STRING_ENC_GUESS;
+        QString enc = hit->hit_desc;
+        enc = enc.section(".", 1, 1);
+        if (!enc.isEmpty()) {
+            encoding = rz_str_enc_string_as_type(enc.toUtf8().constData());
+        }
+
+        if (encoding == RZ_STRING_ENC_GUESS) {
+            encoding = rz_str_guess_encoding_from_buffer(buffer.data(), dataSize);
+        }
+
+        sopt.buffer = buffer.data();
+        sopt.length = dataSize;
+        sopt.encoding = encoding;
+        sopt.wrap_at = 0;
+        sopt.escape_nl = false;
+        sopt.json = false;
+        sopt.stop_at_nil = true;
+        sopt.stop_at_unprintable = false;
+        sopt.urlencode = false;
+
+        data = fromOwnedCharPtr(rz_str_stringify_raw_buffer(&sopt, nullptr));
+        break;
+    }
+    }
+
+    return data;
+}
+
+static QString cutterValueAsHex(QString strVal, bool bigEndian, size_t size)
+{
+    ut64 value = rz_num_math(nullptr, strVal.toUtf8().constData());
+    ut8 buffer[sizeof(ut64)] = { 0 };
+    char output[64] = { 0 };
+    rz_write_ble(buffer, value, bigEndian, size);
+    rz_hex_bin2str(buffer, size == 32 ? 4 : 8, output);
+    return output;
+}
+
+QList<SearchDescription> CutterCore::getAllSearch(QString searchFor, SearchKind kind, QString in)
+{
+    if (searchFor.isEmpty() && kind != SearchKind::CryptographicMaterial
+        && kind != SearchKind::MagicSignature) {
+        return {};
+    }
+
+    // call the oldsyle command for this search.
+    // this must be done before CORE_LOCK() to avoid deadlocks.
+    switch (kind) {
+    case SearchKind::AsmCode:
+        /* fall-thru */
+    case SearchKind::ROPGadgets:
+        /* fall-thru */
+    case SearchKind::ROPGadgetsRegex:
+        // old style search
+        return getAllSearchCommand(searchFor, kind, in);
+    default:
+        // use C API
+        break;
+    }
+
+    CORE_LOCK();
+
+    if (core->in_search) {
+        // this is impossible to happen, unless the user runs
+        // search via terminal before calling the Qt UI
+        RZ_LOG_ERROR("cutter: recursive search detected, search aborted.\n");
+        return {};
+    }
+
+    // this takes ownership of the search lock
+    CutterSearchLock searchLock(core);
+
+    TempConfig cfg;
+    cfg.set("search.in", in);
+
+    QList<SearchDescription> searchRef;
+    RzList /*<RzSearchHit *>*/ *hits = nullptr;
+    auto userOpts = cutterSetupSearchOptions(core);
+    if (!userOpts) {
+        return searchRef;
+    }
+
     switch (kind) {
     default:
         qWarning() << tr("Error invalid search kind\n");
         return searchRef;
-    case SearchKind::HexString:
-        cmd = "/xj";
+    case SearchKind::HexString: {
+        RzSearchBytesPattern *pattern =
+                rz_search_parse_byte_pattern(searchFor.toUtf8().constData(), "bytes");
+        if (!pattern) {
+            return searchRef;
+        }
+        hits = rz_core_search_bytes(core, userOpts.get(), pattern);
         break;
+    }
+    case SearchKind::Value32BE: {
+        searchFor = cutterValueAsHex(searchFor, true, 32);
+        RzSearchBytesPattern *pattern =
+                rz_search_parse_byte_pattern(searchFor.toUtf8().constData(), "value32.be");
+        if (!pattern) {
+            return searchRef;
+        }
+        hits = rz_core_search_bytes(core, userOpts.get(), pattern);
+        break;
+    }
+    case SearchKind::Value32LE: {
+        searchFor = cutterValueAsHex(searchFor, false, 32);
+        RzSearchBytesPattern *pattern =
+                rz_search_parse_byte_pattern(searchFor.toUtf8().constData(), "value32.le");
+        if (!pattern) {
+            return searchRef;
+        }
+        hits = rz_core_search_bytes(core, userOpts.get(), pattern);
+        break;
+    }
+    case SearchKind::Value64BE: {
+        searchFor = cutterValueAsHex(searchFor, true, 64);
+        RzSearchBytesPattern *pattern =
+                rz_search_parse_byte_pattern(searchFor.toUtf8().constData(), "value64.be");
+        if (!pattern) {
+            return searchRef;
+        }
+        hits = rz_core_search_bytes(core, userOpts.get(), pattern);
+        break;
+    }
+    case SearchKind::Value64LE: {
+        searchFor = cutterValueAsHex(searchFor, false, 64);
+        RzSearchBytesPattern *pattern =
+                rz_search_parse_byte_pattern(searchFor.toUtf8().constData(), "value64.le");
+        if (!pattern) {
+            return searchRef;
+        }
+        hits = rz_core_search_bytes(core, userOpts.get(), pattern);
+        break;
+    }
     case SearchKind::String:
-        cmd = "/zj";
+        hits = rz_core_search_string(core, userOpts.get(), searchFor.toUtf8().constData(),
+                                     RZ_REGEX_DEFAULT, RZ_STRING_ENC_GUESS);
         break;
     case SearchKind::StringCaseInsensitive:
-        cmd = "/zj";
-        suffix = "li";
+        hits = rz_core_search_string(core, userOpts.get(), searchFor.toUtf8().constData(),
+                                     RZ_REGEX_CASELESS | RZ_REGEX_LITERAL, RZ_STRING_ENC_GUESS);
         break;
     case SearchKind::StringRegexExtended:
-        cmd = "/zj";
-        suffix = "e";
+        hits = rz_core_search_string(core, userOpts.get(), searchFor.toUtf8().constData(),
+                                     RZ_REGEX_EXTENDED, RZ_STRING_ENC_GUESS);
         break;
-    case SearchKind::Value32BE:
-        cmd = "/vj 4be";
+    case SearchKind::CryptographicMaterial:
+        hits = rz_core_search_cryptographic_material(core, userOpts.get(),
+                                                     RZ_SEARCH_COLLECTION_CRYPTOGRAPHIC_ALL);
         break;
-    case SearchKind::Value32LE:
-        cmd = "/vj 4le";
-        break;
-    case SearchKind::Value64BE:
-        cmd = "/vj 8be";
-        break;
-    case SearchKind::Value64LE:
-        cmd = "/vj 8le";
+    case SearchKind::MagicSignature:
+        hits = rz_core_search_magic(core, userOpts.get(), nullptr);
         break;
     }
-    QString cstr;
-    if (kind == SearchKind::StringRegexExtended || kind == SearchKind::StringCaseInsensitive
-        || kind == SearchKind::String) {
-        // Quote the string since it might contain spaces.
-        cstr = QString("%1 \"%2\" %3").arg(cmd, arg, suffix);
-    } else {
-        cstr = QString("%1 %2").arg(cmd, arg);
-    }
-    searchArray = cmdj(cstr);
-    for (CutterJson searchObject : searchArray) {
-        SearchDescription exp;
 
-        exp.offset = searchObject[RJsonKey::address].toRVA();
-        exp.size = searchObject[RJsonKey::size].toUt64();
-        switch (kind) {
-        default:
-            qWarning() << tr("Error invalid search kind\n");
-            return searchRef;
-        case SearchKind::String:
-        case SearchKind::StringCaseInsensitive:
-        case SearchKind::StringRegexExtended: {
-            QString enc = searchObject[RJsonKey::flag].toString().section(".", 2, 2);
-            if (enc.isEmpty()) {
-                enc = "guess";
-            }
-            QString get_str_cmd =
-                    QString("ps %1 @ 0x%2 @!0x%3")
-                            .arg(enc, QString::number(searchObject[RJsonKey::address].toRVA(), 16),
-                                 QString::number(searchObject[RJsonKey::size].toRVA()
-                                                         * RZ_UNICODE_MAX_BYTES_PER_CHAR,
-                                                 16));
-            auto result = cmdRaw(get_str_cmd).trimmed();
-            exp.data = result;
-            break;
+    RzListIter *it;
+    RzSearchHit *hit;
+    CutterRzListForeach (hits, it, RzSearchHit, hit) {
+        SearchDescription exp;
+        QString detail = fromOwnedCharPtr(rz_search_hit_detail_as_string(hit));
+
+        exp.offset = hit->address;
+        exp.size = hit->size;
+        exp.data = cutterGetSearchHitData(core, kind, hit).trimmed();
+        exp.detail = hit->hit_desc;
+        if (!detail.isEmpty()) {
+            exp.detail += " (" + detail + ")";
         }
-        case SearchKind::HexString:
-        case SearchKind::Value32BE:
-        case SearchKind::Value32LE:
-        case SearchKind::Value64BE:
-        case SearchKind::Value64LE:
-            // Don't add any data for them.
-            // For now they are just reported as length + offset.
-            break;
-        }
+        exp.detail += " ";
+        exp.detail += rz_meta_get_string(core->analysis, RZ_META_TYPE_COMMENT, exp.offset);
+        exp.detail = exp.detail.trimmed();
+
         searchRef << exp;
     }
 
+    rz_list_free(hits);
     return searchRef;
 }
 

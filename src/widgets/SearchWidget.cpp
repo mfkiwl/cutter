@@ -16,20 +16,69 @@ static const int kMaxTooltipHexdumpBytes = 64;
 
 }
 
-static const QMap<QString, QString> searchBoundaries {
-    { "io.maps", "All maps" },
-    { "io.map", "Current map" },
-    { "raw", "Raw" },
-    { "block", "Current block" },
-    { "bin.section", "Current mapped section" },
-    { "bin.sections", "All mapped sections" },
+static const QVector<std::pair<QString, const char *>> searchBoundaries {
+    { "io.maps", QT_TR_NOOP("All maps") },
+    { "io.map", QT_TR_NOOP("Current map") },
+    { "raw", QT_TR_NOOP("Whole file") },
+    { "block", QT_TR_NOOP("Current block") },
+    { "bin.section", QT_TR_NOOP("Current mapped section") },
+    { "bin.sections", QT_TR_NOOP("All mapped sections") },
+    { "bin.segment", QT_TR_NOOP("Current mapped segment") },
+    { "bin.segments", QT_TR_NOOP("All mapped segments") },
+    { "code", QT_TR_NOOP("All exec sections") },
+    { "io.sky", QT_TR_NOOP("All io.skyline") },
+    { "analysis.fcn", QT_TR_NOOP("Current function") },
+    { "analysis.bb", QT_TR_NOOP("Current basic block") },
 };
 
-static const QMap<QString, QString> searchBoundariesDebug { { "dbg.maps", "All memory maps" },
-                                                            { "dbg.map", "Memory map" },
-                                                            { "block", "Current block" },
-                                                            { "dbg.stack", "Stack" },
-                                                            { "dbg.heap", "Heap" } };
+static const QVector<std::pair<QString, const char *>> searchBoundariesDebug {
+    { "dbg.maps", QT_TR_NOOP("All memory maps") },
+    { "dbg.map", QT_TR_NOOP("Memory map") },
+    { "block", QT_TR_NOOP("Current block") },
+    { "dbg.program", QT_TR_NOOP("All exec sections") },
+    { "dbg.stack", QT_TR_NOOP("Stack") },
+    { "dbg.heap", QT_TR_NOOP("Heap") }
+};
+
+struct SearchKindInfo
+{
+    SearchKind kind;
+    const char *name;
+    const char *textHint;
+    bool noInput;
+};
+
+static const SearchKindInfo searchKinds[] = {
+    { SearchKind::AsmCode, QT_TR_NOOP("asm code"), QT_TR_NOOP("jmp rax") },
+    { SearchKind::String, QT_TR_NOOP("string (literal)"), QT_TR_NOOP("foobar") },
+    { SearchKind::StringCaseInsensitive, QT_TR_NOOP("string (case insensitive)"),
+      QT_TR_NOOP("fOobaR") },
+    { SearchKind::StringRegexExtended, QT_TR_NOOP("string (extended regex)"),
+      QT_TR_NOOP("(foo){,4}[Bb]ar") },
+    { SearchKind::HexString, QT_TR_NOOP("hex string"), QT_TR_NOOP("ab01..23...1234ef") },
+    { SearchKind::ROPGadgets, QT_TR_NOOP("ROP gadgets"), QT_TR_NOOP("pop,,pop") },
+    { SearchKind::ROPGadgetsRegex, QT_TR_NOOP("ROP gadgets (regex)"), QT_TR_NOOP("mov e[abc]x") },
+    { SearchKind::Value32BE, QT_TR_NOOP("32bit big endian value"),
+      QT_TR_NOOP("0xdeadbeef (big endian)") },
+    { SearchKind::Value32LE, QT_TR_NOOP("32bit little endian value"),
+      QT_TR_NOOP("0xdeadbeef (little endian)") },
+    { SearchKind::Value64BE, QT_TR_NOOP("64bit big endian value"),
+      QT_TR_NOOP("0xfedcba9876543210 (big endian)") },
+    { SearchKind::Value64BE, QT_TR_NOOP("64bit little endian value"),
+      QT_TR_NOOP("0xfedcba9876543210 (little endian)") },
+    { SearchKind::CryptographicMaterial, QT_TR_NOOP("Cryptographic material"), nullptr, true },
+    { SearchKind::MagicSignature, QT_TR_NOOP("Magic signature"), nullptr, true },
+};
+
+static const SearchKindInfo &searchKindInfo(SearchKind kind)
+{
+    auto res = std::find_if(std::begin(searchKinds), std::end(searchKinds),
+                            [kind](const SearchKindInfo &info) { return info.kind == kind; });
+    if (res != std::end(searchKinds)) {
+        return *res;
+    }
+    return searchKinds[1];
+}
 
 SearchModel::SearchModel(QList<SearchDescription> *search, QObject *parent)
     : AddressableItemModel<QAbstractListModel>(parent), search(search)
@@ -54,6 +103,16 @@ QVariant SearchModel::data(const QModelIndex &index, int role) const
     const SearchDescription &exp = search->at(index.row());
 
     switch (role) {
+    case Qt::FontRole: {
+        switch (index.column()) {
+        case CODE:
+            return QFont("Inconsolata");
+        case DATA:
+            return QFont("Inconsolata");
+        default:
+            return QVariant();
+        }
+    }
     case Qt::DisplayRole:
         switch (index.column()) {
         case OFFSET:
@@ -64,8 +123,9 @@ QVariant SearchModel::data(const QModelIndex &index, int role) const
             return exp.code;
         case DATA:
             return exp.data;
-        case COMMENT:
-            return Core()->getCommentAt(exp.offset);
+        case COMMENT: {
+            return exp.detail;
+        }
         default:
             return QVariant();
         }
@@ -165,7 +225,7 @@ bool SearchSortFilterProxyModel::lessThan(const QModelIndex &left, const QModelI
     case SearchModel::DATA:
         return left_search.data < right_search.data;
     case SearchModel::COMMENT:
-        return Core()->getCommentAt(left_search.offset) < Core()->getCommentAt(right_search.offset);
+        return left_search.detail < right_search.detail;
     default:
         break;
     }
@@ -205,8 +265,7 @@ SearchWidget::~SearchWidget() {}
 
 void SearchWidget::updateSearchBoundaries()
 {
-    QMap<QString, QString>::const_iterator mapIter;
-    QMap<QString, QString> boundaries;
+    QVector<std::pair<QString, const char *>> boundaries;
 
     if (Core()->currentlyDebugging && !Core()->currentlyEmulating) {
         boundaries = searchBoundariesDebug;
@@ -214,13 +273,12 @@ void SearchWidget::updateSearchBoundaries()
         boundaries = searchBoundaries;
     }
 
-    mapIter = boundaries.cbegin();
-    ui->searchInCombo->setCurrentIndex(ui->searchInCombo->findData(mapIter.key()));
+    ui->searchInCombo->setCurrentIndex(ui->searchInCombo->findData(boundaries[0].first));
 
     ui->searchInCombo->blockSignals(true);
     ui->searchInCombo->clear();
-    for (; mapIter != boundaries.cend(); ++mapIter) {
-        ui->searchInCombo->addItem(mapIter.value(), mapIter.key());
+    for (auto item : boundaries) {
+        ui->searchInCombo->addItem(tr(item.second), item.first);
     }
     ui->searchInCombo->blockSignals(false);
 
@@ -239,24 +297,9 @@ void SearchWidget::refreshSearchspaces()
         cur_idx = 0;
 
     ui->searchspaceCombo->clear();
-    ui->searchspaceCombo->addItem(tr("asm code"), static_cast<int>(SearchKind::AsmCode));
-    ui->searchspaceCombo->addItem(tr("string (literal)"), static_cast<int>(SearchKind::String));
-    ui->searchspaceCombo->addItem(tr("string (case insensitive)"),
-                                  static_cast<int>(SearchKind::StringCaseInsensitive));
-    ui->searchspaceCombo->addItem(tr("string (extended regex)"),
-                                  static_cast<int>(SearchKind::StringRegexExtended));
-    ui->searchspaceCombo->addItem(tr("hex string"), static_cast<int>(SearchKind::HexString));
-    ui->searchspaceCombo->addItem(tr("ROP gadgets"), static_cast<int>(SearchKind::ROPGadgets));
-    ui->searchspaceCombo->addItem(tr("ROP gadgets (regex)"),
-                                  static_cast<int>(SearchKind::ROPGadgetsRegex));
-    ui->searchspaceCombo->addItem(tr("32bit big endian value"),
-                                  static_cast<int>(SearchKind::Value32BE));
-    ui->searchspaceCombo->addItem(tr("32bit little endian value"),
-                                  static_cast<int>(SearchKind::Value32LE));
-    ui->searchspaceCombo->addItem(tr("64bit big endian value"),
-                                  static_cast<int>(SearchKind::Value64BE));
-    ui->searchspaceCombo->addItem(tr("64bit little endian value"),
-                                  static_cast<int>(SearchKind::Value64LE));
+    for (auto &kind : searchKinds) {
+        ui->searchspaceCombo->addItem(tr(kind.name), static_cast<int>(kind.kind));
+    }
 
     if (cur_idx > 0)
         ui->searchspaceCombo->setCurrentIndex(cur_idx);
@@ -289,13 +332,24 @@ void SearchWidget::refreshSearch()
 // Called by &QShortcut::activated and &QAbstractButton::clicked signals
 void SearchWidget::checkSearchResultEmpty()
 {
-    if (search.isEmpty()) {
-        QString noResultsMessage = "<b>";
-        noResultsMessage.append(tr("No results found for:"));
-        noResultsMessage.append("</b><br>");
-        noResultsMessage.append(ui->filterLineEdit->text().toHtmlEscaped());
-        QMessageBox::information(this, tr("No Results Found"), noResultsMessage);
+    if (!search.isEmpty())
+        return;
+
+    QString searchFor = ui->filterLineEdit->text();
+    auto searchSpace = static_cast<SearchKind>(ui->searchspaceCombo->currentData().toInt());
+    if (searchFor.isEmpty() && !searchKindInfo(searchSpace).noInput) {
+        return;
     }
+    QString noResultsMessage = "<b>";
+    noResultsMessage.append(tr("No results found for:"));
+    noResultsMessage.append("</b><br>");
+    if (searchFor.isEmpty()) {
+        noResultsMessage.append(ui->searchspaceCombo->currentText().toHtmlEscaped());
+    } else {
+        noResultsMessage.append(ui->filterLineEdit->text().toHtmlEscaped());
+    }
+
+    QMessageBox::information(this, tr("No Results Found"), noResultsMessage);
 }
 
 void SearchWidget::setScrollMode()
@@ -303,44 +357,19 @@ void SearchWidget::setScrollMode()
     qhelpers::setVerticalScrollMode(ui->searchTreeView);
 }
 
-void SearchWidget::updatePlaceholderText(int index)
+void SearchWidget::updatePlaceholderText(int)
 {
-    switch (index) {
-    case 0: // string
-        ui->filterLineEdit->setPlaceholderText("jmp rax");
-        break;
-    case 1: // string
-        ui->filterLineEdit->setPlaceholderText("foobar");
-        break;
-    case 2: // string (case insensitive)
-        ui->filterLineEdit->setPlaceholderText("FooBar");
-        break;
-    case 3: // string (extended regex)
-        ui->filterLineEdit->setPlaceholderText("(foo){,4}[Bb]ar");
-        break;
-    case 4: // hex string
-        ui->filterLineEdit->setPlaceholderText("deadbeef");
-        break;
-    case 5: // ROP gadgets
-        ui->filterLineEdit->setPlaceholderText("pop,,pop");
-        break;
-    case 6: // ROP gadgets (regex)
-        ui->filterLineEdit->setPlaceholderText("mov e[abc]x");
-        break;
-    case 7: // 32bit value be
-        ui->filterLineEdit->setPlaceholderText("0xdeadbeef");
-        break;
-    case 8: // 32bit value le
-        ui->filterLineEdit->setPlaceholderText("0xdeadbeef");
-        break;
-    case 9: // 64bit value be
-        ui->filterLineEdit->setPlaceholderText("0xfedcba9876543210");
-        break;
-    case 10: // 64bit value le
-        ui->filterLineEdit->setPlaceholderText("0xfedcba9876543210");
-        break;
-    default:
-        ui->filterLineEdit->setPlaceholderText("<No preview defined>");
+    // ensure we grab the correct kind.
+    auto kind = static_cast<SearchKind>(ui->searchspaceCombo->currentData().toInt());
+    auto info = searchKindInfo(kind);
+    if (info.textHint) {
+        ui->filterLineEdit->setPlaceholderText(tr(info.textHint));
+    } else {
+        ui->filterLineEdit->setPlaceholderText("");
+    }
+    ui->filterLineEdit->setDisabled(info.noInput);
+    if (info.noInput) {
+        ui->filterLineEdit->clear();
     }
 }
 
