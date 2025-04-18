@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 DisassemblyWidget::DisassemblyWidget(MainWindow *main)
     : MemoryDockWidget(MemoryWidgetType::Disassembly, main),
@@ -50,7 +51,8 @@ DisassemblyWidget::DisassemblyWidget(MainWindow *main)
     layout->setContentsMargins(0, 0, 0, 0);
     mDisasScrollArea->viewport()->setLayout(layout);
     splitter->addWidget(mDisasScrollArea);
-    mDisasScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarPolicy::ScrollBarAlwaysOff);
+    connect(mDisasScrollArea->verticalScrollBar(), &QScrollBar::valueChanged, this,
+            [this](int) { refreshDisasm(mDisasScrollArea->currentVScrollAddr()); });
     // Use stylesheet instead of QWidget::setFrameShape(QFrame::NoShape) to avoid
     // issues with dark and light interface themes
     mDisasScrollArea->setStyleSheet("QAbstractScrollArea { border: 0px transparent black; }");
@@ -309,6 +311,7 @@ void DisassemblyWidget::refreshDisasm(RVA offset)
 
     mDisasTextEdit->setLockScroll(false);
     mDisasTextEdit->horizontalScrollBar()->setValue(horizontalScrollValue);
+    mDisasScrollArea->setVScrollPos(topOffset);
 
     // Refresh the left panel (trigger paintEvent)
     leftPanel->update();
@@ -736,29 +739,188 @@ void DisassemblyWidget::setupColors()
     setStyleSheet(DisassemblyPreview::getToolTipStyleSheet());
 }
 
-DisassemblyScrollArea::DisassemblyScrollArea(QWidget *parent) : QAbstractScrollArea(parent) {}
+DisassemblyScrollArea::DisassemblyScrollArea(QWidget *parent) : QAbstractScrollArea(parent)
+{
+    beginOffset = RVA_INVALID;
+    endOffset = RVA_INVALID;
+    accumScrollWheelDeltaY = 0;
+    verticalScrollBar()->setPageStep(40);
+    connect(verticalScrollBar(), &QScrollBar::actionTriggered, this, [this](int action) {
+        QScrollBar *vScrollBar = verticalScrollBar();
+        int val = vScrollBar->value();
+        switch (action) {
+        case QAbstractSlider::SliderSingleStepAdd:
+            // Due to the way the QScrollBar::actionTriggered signal works,
+            // setting the slider pos to its current value here
+            // prevents it from moving, allowing us to basically
+            // override the scroll bar buttons' behavior
+            // See https://doc.qt.io/qt-6/qabstractslider.html#actionTriggered
+            // for more info.
+            vScrollBar->setSliderPosition(val);
+            if (val != vScrollBar->maximum()) {
+                emit scrollLines(1);
+            }
+            return;
+        case QAbstractSlider::SliderSingleStepSub:
+            // Same as above
+            vScrollBar->setSliderPosition(val);
+            if (val != vScrollBar->minimum()) {
+                emit scrollLines(-1);
+            }
+            return;
+        default:
+            break;
+        }
+    });
+    refreshVScrollbarRange();
+    connect(Core(), &CutterCore::refreshAll, this, &DisassemblyScrollArea::refreshVScrollbarRange);
+}
+
+RVA DisassemblyScrollArea::binSize()
+{
+    return endOffset - beginOffset;
+}
+
+RVA DisassemblyScrollArea::currentVScrollAddr()
+{
+    int maximum = verticalScrollBar()->maximum();
+    if (!maximum || !binSize()) {
+        return beginOffset;
+    }
+    // Fallback formula for large files
+    if ((RVA_MAX / maximum) < binSize()) {
+        return verticalScrollBar()->value() * (binSize() / maximum)
+                + std::min<RVA>(verticalScrollBar()->value(), binSize() % maximum) + beginOffset;
+    }
+    return (verticalScrollBar()->value() * binSize()) / maximum + beginOffset;
+}
+
+void DisassemblyScrollArea::setVScrollPos(RVA address)
+{
+    const QSignalBlocker blocker(verticalScrollBar());
+    int maximum = verticalScrollBar()->maximum();
+    if (!maximum || !binSize()) {
+        setVerticalScrollBarPolicy(Qt::ScrollBarPolicy::ScrollBarAlwaysOff);
+        return;
+    }
+    int scrollBarPos = 0;
+    if (address < beginOffset) {
+        verticalScrollBar()->setValue(scrollBarPos);
+        return;
+    }
+    if (address > endOffset) {
+        verticalScrollBar()->setValue(verticalScrollBar()->maximum());
+        return;
+    }
+    auto offset = address - beginOffset;
+    if ((RVA_MAX / maximum) < binSize()) {
+        // Fallback formula for large files
+        uint64_t smallBox = binSize() / maximum;
+        uint64_t extra = binSize() % maximum;
+        auto bigBoxRange = (smallBox + 1) * extra;
+        if (offset < bigBoxRange) {
+            scrollBarPos = offset / (smallBox + 1);
+        } else {
+            scrollBarPos = extra + (offset - bigBoxRange) / smallBox;
+        }
+    } else {
+        scrollBarPos = (maximum * offset) / binSize();
+    }
+    if (address != beginOffset && scrollBarPos == 0) {
+        scrollBarPos = 1;
+    }
+    verticalScrollBar()->setValue(scrollBarPos);
+}
+
+void DisassemblyScrollArea::refreshVScrollbarRange()
+{
+    beginOffset = RVA_MAX;
+    endOffset = 0;
+    if (!Core()->currentlyEmulating && Core()->currentlyDebugging) {
+        QString currentlyOpenFile = Core()->getConfig("file.path");
+        QList<MemoryMapDescription> memoryMaps = Core()->getMemoryMap();
+        for (const MemoryMapDescription &map : memoryMaps) {
+            if (map.fileName == currentlyOpenFile) {
+                if (map.addrStart < beginOffset) {
+                    beginOffset = map.addrStart;
+                }
+                if (map.addrEnd > endOffset) {
+                    endOffset = map.addrEnd;
+                }
+            }
+        }
+    } else {
+        RzCoreLocked core(Core());
+        RzPVector *mapsPtr = rz_io_maps(core->io);
+        if (!mapsPtr) {
+            setVerticalScrollBarPolicy(Qt::ScrollBarPolicy::ScrollBarAlwaysOff);
+            return;
+        }
+        CutterPVector<RzIOMap> maps { mapsPtr };
+        for (const RzIOMap *const map : maps) {
+            // Skip the ESIL memory stack region
+            if (Core()->currentlyEmulating && std::strncmp(rz_str_get(map->name), "mem.", 4) == 0) {
+                continue;
+            }
+            ut64 b = rz_itv_begin(map->itv);
+            ut64 e = rz_itv_end(map->itv);
+            if (b < beginOffset) {
+                beginOffset = b;
+            }
+            if (e > endOffset) {
+                endOffset = e;
+            }
+        }
+    }
+    if (endOffset) {
+        --endOffset;
+    }
+    if (endOffset == 0) {
+        beginOffset = 0;
+    }
+    verticalScrollBar()->setMinimum(0);
+    // Increasing this value increases scroll bar accuracy for small files but
+    // decreases it for large files
+    // Sufficiently below 2^32 to avoid causing problems in calculations done by QScrollbar,
+    // otherwise as high as possible to maximize range in which address map 1:1 to scrollbar pos.
+    const int rangeMax = 512 * 1024 * 1024;
+    if (binSize() > rangeMax) {
+        verticalScrollBar()->setMaximum(rangeMax);
+    } else {
+        verticalScrollBar()->setMaximum(binSize());
+    }
+    if (binSize()) {
+        setVerticalScrollBarPolicy(Qt::ScrollBarPolicy::ScrollBarAlwaysOn);
+    } else {
+        setVerticalScrollBarPolicy(Qt::ScrollBarPolicy::ScrollBarAlwaysOff);
+    }
+}
 
 bool DisassemblyScrollArea::viewportEvent(QEvent *event)
 {
-    int dy = verticalScrollBar()->value() - 5;
-    if (dy != 0) {
-        emit scrollLines(dy);
-    }
-
     if (event->type() == QEvent::Resize) {
         emit disassemblyResized();
     }
 
-    resetScrollBars();
     return QAbstractScrollArea::viewportEvent(event);
 }
 
-void DisassemblyScrollArea::resetScrollBars()
+void DisassemblyScrollArea::wheelEvent(QWheelEvent *event)
 {
-    verticalScrollBar()->blockSignals(true);
-    verticalScrollBar()->setRange(0, 10);
-    verticalScrollBar()->setValue(5);
-    verticalScrollBar()->blockSignals(false);
+    if (event->angleDelta().isNull() || !event->angleDelta().y()) {
+        QAbstractScrollArea::wheelEvent(event);
+        return;
+    }
+    accumScrollWheelDeltaY += event->angleDelta().y();
+    // Delta is reported in 1/8 of a degree
+    // eg. 120 units * 1/8 = 15 degrees
+    // Typical scroll speed is 1 line per 5 degrees
+    const int lineDelta = 5 * 8;
+    if (accumScrollWheelDeltaY >= lineDelta || accumScrollWheelDeltaY <= -lineDelta) {
+        int lineCount = accumScrollWheelDeltaY / lineDelta;
+        accumScrollWheelDeltaY -= lineDelta * lineCount;
+        emit scrollLines(-lineCount);
+    }
 }
 
 qreal DisassemblyTextEdit::textOffset() const
@@ -946,7 +1108,7 @@ void DisassemblyLeftPanel::paintEvent(QPaintEvent *event)
             int bottom = offsetToLine(arrow.max) - minLine + 1;
             auto minMax = maxLevelTree.rangeMinMax(top, bottom);
             if (minMax.first > 1) {
-                arrow.level = 1; // place bellow existing lines
+                arrow.level = 1; // place below existing lines
             } else {
                 arrow.level = minMax.second + 1; // place on top of existing lines
                 maxLevel = std::max(maxLevel, arrow.level);
