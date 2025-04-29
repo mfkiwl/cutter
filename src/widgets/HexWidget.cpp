@@ -3,6 +3,7 @@
 #include "Configuration.h"
 #include "dialogs/WriteCommandsDialogs.h"
 #include "dialogs/CommentsDialog.h"
+#include "dialogs/FlagDialog.h"
 
 #include <QPainter>
 #include <QPaintEvent>
@@ -130,6 +131,22 @@ HexWidget::HexWidget(QWidget *parent)
     actionComment->setShortcut(Qt::Key_Semicolon);
     connect(actionComment, &QAction::triggered, this, &HexWidget::onActionAddCommentTriggered);
     addAction(actionComment);
+
+    // Add flag option
+    actionAddFlag =
+            new QAction(tr("Add flag at %1").arg(RzAddressString(getLocationAddress())), this);
+    actionAddFlag->setShortcutContext(Qt::ShortcutContext::WidgetWithChildrenShortcut);
+    actionAddFlag->setShortcut(Qt::Key_N);
+    connect(actionAddFlag, &QAction::triggered, this, &HexWidget::onActionAddFlagTriggered);
+    connect(this, &HexWidget::positionChanged, this, [this](RVA pos) {
+        RzAnalysisFunction *fcn = Core()->functionAt(pos);
+        if (fcn) {
+            actionAddFlag->setVisible(false);
+        } else {
+            actionAddFlag->setVisible(true);
+        }
+    });
+    addAction(actionAddFlag);
 
     // delete comment option
     actionDeleteComment = new QAction(tr("Delete Comment"), this);
@@ -1153,12 +1170,21 @@ void HexWidget::contextMenuEvent(QContextMenuEvent *event)
 
     QString comment = Core()->getCommentAt(cursor.address);
 
-    if (comment.isNull() || comment.isEmpty()) {
+    if (comment.isEmpty()) {
         actionDeleteComment->setVisible(false);
         actionComment->setText(tr("Add Comment"));
     } else {
         actionDeleteComment->setVisible(true);
         actionComment->setText(tr("Edit Comment"));
+    }
+
+    QString flag = Core()->flagAt(cursor.address, false);
+    actionAddFlag->setData(flag);
+
+    if (flag.isEmpty()) {
+        actionAddFlag->setText(tr("Add flag at %1").arg(RzAddressString(cursor.address)));
+    } else {
+        actionAddFlag->setText(tr("Rename flag \"%1\"").arg(flag));
     }
 
     if (!ioModesController.canWrite()) {
@@ -1232,6 +1258,7 @@ void HexWidget::onActionAddCommentTriggered()
 {
     uint64_t addr = cursor.address;
     CommentsDialog::addOrEditComment(addr, this);
+    refresh();
 }
 
 // slot for deleting comment action
@@ -1239,6 +1266,15 @@ void HexWidget::onActionDeleteCommentTriggered()
 {
     uint64_t addr = cursor.address;
     Core()->delComment(addr);
+    refresh();
+}
+
+void HexWidget::onActionAddFlagTriggered()
+{
+    QString flagNameHint = actionAddFlag->data().toString();
+    if (FlagDialog(cursor.address, this, flagNameHint).exec()) {
+        refresh();
+    }
 }
 
 void HexWidget::onRangeDialogAccepted()
