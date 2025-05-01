@@ -211,8 +211,8 @@ void DecompilerContextMenu::aboutToShowSlot()
             actionRenameThingHere.setText(
                     tr("Rename function %1").arg(QString(annotationHere->reference.name)));
         } else if (annotationHere->type == RZ_CODE_ANNOTATION_TYPE_GLOBAL_VARIABLE) {
-            RzFlagItem *flagDetails =
-                    rz_flag_get_i(Core()->core()->flags, annotationHere->reference.offset);
+            RzCoreLocked core = Core()->lock();
+            RzFlagItem *flagDetails = rz_flag_get_i(core->flags, annotationHere->reference.offset);
             if (flagDetails) {
                 actionRenameThingHere.setText(tr("Rename %1").arg(QString(flagDetails->name)));
                 actionDeleteName.setText(tr("Remove %1").arg(QString(flagDetails->name)));
@@ -227,7 +227,8 @@ void DecompilerContextMenu::aboutToShowSlot()
     if (isReference()) {
         actionCopyReferenceAddress.setVisible(true);
         RVA referenceAddr = annotationHere->reference.offset;
-        RzFlagItem *flagDetails = rz_flag_get_i(Core()->core()->flags, referenceAddr);
+        RzCoreLocked core = Core()->lock();
+        RzFlagItem *flagDetails = rz_flag_get_i(core->flags, referenceAddr);
         if (annotationHere->type == RZ_CODE_ANNOTATION_TYPE_FUNCTION_NAME) {
             actionCopyReferenceAddress.setText(tr("Copy address of %1 (%2)")
                                                        .arg(QString(annotationHere->reference.name),
@@ -400,7 +401,7 @@ void DecompilerContextMenu::actionRenameThingHereTriggered()
     if (!annotationHere || annotationHere->type == RZ_CODE_ANNOTATION_TYPE_CONSTANT_VARIABLE) {
         return;
     }
-    RzCoreLocked core = Core()->core();
+    RzCoreLocked core = Core()->lock();
     bool ok;
     auto type = annotationHere->type;
     if (type == RZ_CODE_ANNOTATION_TYPE_FUNCTION_NAME) {
@@ -568,7 +569,7 @@ void DecompilerContextMenu::updateTargetMenuActions()
         action->deleteLater();
     }
     showTargetMenuActions.clear();
-    RzCoreLocked core = Core()->core();
+    RzCoreLocked core = Core()->lock();
     if (isReference()) {
         QString name;
         QMenu *menu = nullptr;

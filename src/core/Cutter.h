@@ -712,6 +712,8 @@ public:
 
     QStringList getSectionList();
 
+    RzCoreLocked lock();
+    CUTTER_DEPRECATED("Use CutterCore::lock instead")
     RzCoreLocked core();
 
     static QString ansiEscapeToHtml(const QString &text);
@@ -882,8 +884,12 @@ public:
     RzCoreLocked &operator=(const RzCoreLocked &) = delete;
     RzCoreLocked(RzCoreLocked &&);
     ~RzCoreLocked();
-    operator RzCore *() const;
-    RzCore *operator->() const;
+    operator RzCore *() &;
+    RzCore *operator->() &;
+    // Reduce chance of following misuse of Core()->lock()
+    // rizinStruct* foo = rizin_func(Core()->lock()->something, arg);
+    operator RzCore *() && = delete;
+    RzCore *operator->() && = delete;
 };
 
 #endif // CUTTER_H
