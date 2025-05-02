@@ -141,7 +141,21 @@ ExportsWidget::ExportsWidget(MainWindow *main) : ListDockWidget(main)
     exportsModel = new ExportsModel(&exports, this);
     exportsProxyModel = new ExportsProxyModel(exportsModel, this);
     setModels(exportsProxyModel);
+
     ui->treeView->sortByColumn(ExportsModel::OffsetColumn, Qt::AscendingOrder);
+    connect(ui->treeView->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this]() {
+        AddressableItemContextMenu *contextMenu = ui->treeView->getItemContextMenu();
+        QModelIndex index = ui->treeView->selectionModel()->currentIndex();
+        if (index.isValid()) {
+            QVariant variant = exportsProxyModel->data(index, ExportsModel::ExportDescriptionRole);
+            if (variant.canConvert<ExportDescription>()) {
+                auto exp = variant.value<ExportDescription>();
+                contextMenu->toggleBreakpointAction(exp.type == "FUNC");
+                return;
+            }
+        }
+        contextMenu->toggleBreakpointAction(false);
+    });
 
     QShortcut *toggle_shortcut = new QShortcut(widgetShortcuts["ExportsWidget"], main);
     connect(toggle_shortcut, &QShortcut::activated, this, [=]() { toggleDockWidget(true); });
