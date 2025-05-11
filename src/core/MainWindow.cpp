@@ -1181,7 +1181,7 @@ void MainWindow::updateHistoryMenu(QMenu *menu, bool redo)
             name.truncate(MAX_NAME_LENGTH); // TODO:#1904 use common name shortening function
             QString label = QString("%1 (%2)").arg(name, addressString);
             if (current) {
-                label = QString("current position (%1)").arg(addressString);
+                label = tr("current position (%1)").arg(addressString);
             }
             QAction *action = new QAction(label, menu);
             action->setToolTip(toolTip);
@@ -1682,7 +1682,7 @@ void MainWindow::on_actionAnalyze_triggered()
 {
     auto *analysisTask = new AnalysisTask();
     InitialOptions options;
-    options.analysisCmd = { { "aaa", "Auto analysis" } };
+    options.analysisCmd = { { "aaa", QT_TRANSLATE_NOOP("InitialOptionsDialog", "Auto analysis") } };
     analysisTask->setOptions(options);
     AsyncTask::Ptr analysisTaskPtr(analysisTask);
 
