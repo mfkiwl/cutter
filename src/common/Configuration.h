@@ -30,6 +30,17 @@ struct CutterInterfaceTheme
     ColorFlags flag;
 };
 
+struct RecentFileEntry
+{
+    QString ioMode;
+    QString path;
+
+    bool operator==(const RecentFileEntry &other) const
+    {
+        return ioMode == other.ioMode && path == other.path;
+    }
+};
+
 class CUTTER_EXPORT Configuration : public QObject
 {
     Q_OBJECT
@@ -225,14 +236,14 @@ public:
     /**
      * @brief Recently opened binaries, as shown in NewFileDialog.
      */
-    QStringList getRecentFiles() const;
-    void setRecentFiles(const QStringList &list);
+    QList<RecentFileEntry> getRecentFiles() const;
+    void setRecentFiles(const QList<RecentFileEntry> &list);
 
     /**
      * @brief Recently opened projects, as shown in NewFileDialog.
      */
-    QStringList getRecentProjects() const;
-    void setRecentProjects(const QStringList &list);
+    QList<RecentFileEntry> getRecentProjects() const;
+    void setRecentProjects(const QList<RecentFileEntry> &list);
     void addRecentProject(QString file);
 
     // Functions Widget Layout

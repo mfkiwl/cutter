@@ -808,31 +808,60 @@ void Configuration::setGraphBlockEntryOffset(bool enabled)
     s.setValue("graphBlockEntryOffset", enabled);
 }
 
-QStringList Configuration::getRecentFiles() const
+QList<RecentFileEntry> Configuration::getRecentFiles() const
 {
-    return s.value("recentFileList").toStringList();
+    QList<RecentFileEntry> recentFiles;
+
+    const QStringList list = s.value("recentFileList").toStringList();
+    for (const QString &file : list) {
+        int sep = file.indexOf("://");
+        if (sep != -1) {
+            QString ioMode = file.left(sep + 3);
+            QString path = file.mid(sep + 3);
+            recentFiles.append({ ioMode, path });
+        } else {
+            recentFiles.append({ "file://", file });
+        }
+    }
+
+    return recentFiles;
 }
 
-void Configuration::setRecentFiles(const QStringList &list)
+void Configuration::setRecentFiles(const QList<RecentFileEntry> &list)
 {
-    s.setValue("recentFileList", list);
+    QStringList recentFiles;
+    for (const RecentFileEntry &file : list) {
+        recentFiles.append(file.ioMode + file.path);
+    }
+    s.setValue("recentFileList", recentFiles);
 }
 
-QStringList Configuration::getRecentProjects() const
+QList<RecentFileEntry> Configuration::getRecentProjects() const
 {
-    return s.value("recentProjectsList").toStringList();
+    QList<RecentFileEntry> recentProjects;
+    const QStringList list = s.value("recentProjectsList").toStringList();
+    for (const QString &project : list) {
+        recentProjects.append(
+                { "", project }); // recent projects don’t include ioMode, so just leave it empty
+    }
+    return recentProjects;
 }
 
-void Configuration::setRecentProjects(const QStringList &list)
+void Configuration::setRecentProjects(const QList<RecentFileEntry> &list)
 {
-    s.setValue("recentProjectsList", list);
+    QStringList recentProjects;
+    for (const RecentFileEntry &project : list) {
+        recentProjects.append(project.path);
+    }
+    s.setValue("recentProjectsList", recentProjects);
 }
 
 void Configuration::addRecentProject(QString file)
 {
-    QStringList files = getRecentProjects();
-    files.removeAll(file);
-    files.prepend(file);
+    RecentFileEntry project = { "", file };
+    QList<RecentFileEntry> files = getRecentProjects();
+    files.removeAll(project);
+    files.prepend(project);
     setRecentProjects(files);
 }
 
